@@ -1,8 +1,26 @@
 import os
 import joblib
 import requests
+from pathlib import Path
 from flask import Flask, request, jsonify
 from supabase import create_client, Client
+from dotenv import load_dotenv
+
+
+# ============================================================
+# PEMBACAAN .ENV SECARA ABSOLUT
+# ============================================================
+# 1. Dapatkan lokasi folder dari file index.py ini (/api)
+CURRENT_DIR = Path(__file__).resolve().parent
+
+# 2. Naik satu tingkat ke folder root (/skripsi-bintang)
+ROOT_DIR = CURRENT_DIR.parent
+
+# 3. Gabungkan dengan nama file .env
+ENV_PATH = ROOT_DIR / ".env"
+
+# 4. Load env secara eksplisit
+load_dotenv(dotenv_path=ENV_PATH)
 
 app = Flask(__name__)
 
@@ -10,9 +28,9 @@ app = Flask(__name__)
 # KONFIGURASI ENVIRONMENT VARIABLES
 # (Akan diisi melalui dashboard Vercel)
 # ============================================================
-SUPABASE_URL = os.environ.get("https://mxbizwuulukihdqplvnj.supabase.co")
-SUPABASE_KEY = os.environ.get("sb_publishable_8hqGZ9J67IcKZIGRPRmT3Q_j6tPp-i6")
-TELEGRAM_TOKEN = os.environ.get("8660151353:AAHRVk80ZVeM847MOVezLs5Pe7k0JiSk4-I")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
 # Validasi awal untuk mencegah crash jika env belum diatur
 if SUPABASE_URL and SUPABASE_KEY:
@@ -154,7 +172,11 @@ def predict_esp32():
         send_telegram_message(chat_id, pesan)
 
         # 5. Balas ESP32
-        return jsonify({"status": "success", "waktu_menit": prediksi_waktu}), 200
+        return jsonify({
+            "status": "success", 
+            "waktu_menit": prediksi_waktu,
+            "jenis_sepatu": jenis_sepatu  # Tambahkan baris ini
+        }), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500

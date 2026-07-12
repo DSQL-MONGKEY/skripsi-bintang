@@ -1,0 +1,378 @@
+#include <DHT.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
+
+// ======================================================
+// WIFI & API URL VERCEL
+// ======================================================
+const char* ssid     = "KOSANBUTIA_LT2";
+const char* password = "01234321";
+
+// PENTING: Ganti dengan URL domain Vercel Anda
+const char* api_url  = "https://[NAMA_DOMAIN_VERCEL_ANDA].vercel.app/api/predict";
+
+// ======================================================
+// PREFERENCES (SAVE/LOAD DATA)
+// ======================================================
+Preferences preferences;
+
+// ======================================================
+// DHT11
+// ======================================================
+#define DHTPIN   14
+#define DHTTYPE  DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// ======================================================
+// LCD
+// ======================================================
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// ======================================================
+// RELAY
+// ======================================================
+#define RELAY1_PIN  15
+#define RELAY2_PIN  16
+#define DRYER_PIN   17
+#define LAMP_PIN    18
+
+// ======================================================
+// VARIABLE STATE
+// ======================================================
+String jenisSepatu      = "-";
+float  suhuTarget       = 35.0;
+int    waktuTargetMenit = 60;
+
+bool pengeringAktif       = false;
+bool relayMenyala         = false;
+
+unsigned long elapsedRecovery  = 0;
+unsigned long waktuMulai       = 0;
+
+// ======================================================
+// TARGET AKHIR PER JENIS SEPATU
+// ======================================================
+// 0 = Canvas, 1 = Leather, 2 = Mesh
+const float SUHU_AKHIR_TARGET[3]       = {47.0, 45.5, 44.5};
+const float KELEMBAPAN_AKHIR_TARGET[3] = {7.0,  1.0,  0.5};
+const float MARGIN_KELEMBABAN_KERING   = 1.5;
+
+// ======================================================
+// DETEKSI KERING
+// ======================================================
+bool          sedangStabilKering = false;
+unsigned long waktuMulaiStabil   = 0;
+
+const float TOLERANSI_SUHU_KERING   = 0.5;   
+const unsigned long STABIL_MINIMAL_MS = 5UL * 60000UL;
+
+// ======================================================
+// TIMING & POLLING
+// ======================================================
+unsigned long lastTimeApiRan      = 0;
+const unsigned long API_POLL_RATE = 5000; // Polling ke Vercel tiap 5 detik
+unsigned long lastSave            = 0;
+unsigned long lastLCD             = 0;
+bool          lcdSlide            = false;
+
+const unsigned long WIFI_RECONNECT_TIMEOUT_MS = 10000UL;
+
+// ======================================================
+// MATIKAN RELAY
+// ======================================================
+void matikanRelay() {
+  digitalWrite(RELAY1_PIN, HIGH);
+  digitalWrite(RELAY2_PIN, HIGH);
+  digitalWrite(DRYER_PIN,  HIGH);
+  digitalWrite(LAMP_PIN,   HIGH);
+  relayMenyala = false;
+}
+
+// ======================================================
+// SAVE DATA (UNTUK RECOVERY MATI LAMPU)
+// ======================================================
+void simpanData() {
+  unsigned long waktuBerjalan = (millis() - waktuMulai) / 60000;
+
+  preferences.begin("dryer", false);
+  preferences.putBool("aktif",     pengeringAktif);
+  preferences.putString("jenis",   jenisSepatu);
+  preferences.putInt("target",     waktuTargetMenit);
+  preferences.putULong("elapsed",  waktuBerjalan);
+  preferences.end();
+}
+
+// ======================================================
+// LOAD DATA (AUTO-RESUME)
+// ======================================================
+void loadData() {
+  preferences.begin("dryer", true);
+  String        savedJenis  = preferences.getString("jenis",    "-");
+  bool          aktif       = preferences.getBool("aktif",      false);
+  int           savedTarget = preferences.getInt("target",      0);
+  unsigned long elapsed     = preferences.getULong("elapsed",   0);
+  preferences.end();
+
+  bool dataValid = aktif && savedTarget > 0 && elapsed < (unsigned long)savedTarget;
+  int sisaWaktu  = savedTarget - (int)elapsed;
+  if (sisaWaktu < 5) dataValid = false;
+
+  if (dataValid) {
+    jenisSepatu      = savedJenis;
+    waktuTargetMenit = savedTarget;
+    elapsedRecovery  = elapsed;
+    
+    Serial.println("📂 Sesi terputus ditemukan! Auto-resume dijalankan.");
+    
+    pengeringAktif   = true;
+    relayMenyala     = true;
+    waktuMulai       = millis() - (elapsedRecovery * 60000UL);
+    lastSave         = millis();
+
+    digitalWrite(RELAY1_PIN, LOW);
+    digitalWrite(RELAY2_PIN, LOW);
+    digitalWrite(DRYER_PIN,  LOW);
+    digitalWrite(LAMP_PIN,   LOW);
+  } else {
+    jenisSepatu      = "-";
+    waktuTargetMenit = 60;
+    pengeringAktif   = false;
+    relayMenyala     = false;
+  }
+}
+
+// ======================================================
+// HELPER
+// ======================================================
+int jenisSepatuKeKode(String jenis) {
+  if      (jenis == "Kanvas") return 0;
+  else if (jenis == "Kulit")  return 1;
+  else                        return 2; 
+}
+
+float getBatasKelembapanKering(String jenis) {
+  int kode = jenisSepatuKeKode(jenis);
+  return KELEMBAPAN_AKHIR_TARGET[kode] + MARGIN_KELEMBABAN_KERING;
+}
+
+// ======================================================
+// MULAI PENGERING (TRIGGER DARI VERCEL)
+// ======================================================
+void mulaiPengeringVercel(String jenis, int prediksiWaktu) {
+  int jenisKode = jenisSepatuKeKode(jenis);
+  int kodeAman = (jenisKode >= 0 && jenisKode <= 2) ? jenisKode : 2;
+  
+  jenisSepatu      = jenis;
+  suhuTarget       = SUHU_AKHIR_TARGET[kodeAman];
+  waktuTargetMenit = prediksiWaktu;
+
+  pengeringAktif   = true;
+  relayMenyala     = true;
+  waktuMulai       = millis();
+  lastSave         = millis();
+
+  sedangStabilKering = false;
+  waktuMulaiStabil   = 0;
+
+  digitalWrite(RELAY1_PIN, LOW);
+  digitalWrite(RELAY2_PIN, LOW);
+  digitalWrite(DRYER_PIN,  LOW);
+  digitalWrite(LAMP_PIN,   LOW);
+  
+  simpanData();
+  Serial.println("✅ Relay menyala, pengeringan dimulai selama " + String(prediksiWaktu) + " menit.");
+}
+
+// ======================================================
+// HTTP POLLING KE VERCEL
+// ======================================================
+void cekPerintahVercel(float suhu, float kelembapan) {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  http.begin(api_url);
+  http.addHeader("Content-Type", "application/json");
+
+  // Susun payload JSON murni
+  String payload = "{\"suhu_awal\":" + String(suhu, 1) + ",\"kelembapan_awal\":" + String(kelembapan, 1) + "}";
+  
+  int httpResponseCode = http.POST(payload);
+
+  if (httpResponseCode == 200) {
+    String response = http.getString();
+    
+    // Parse JSON
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, response);
+    
+    if (!error) {
+      String status = doc["status"];
+      
+      // Jika ada request dari user di Telegram
+      if (status == "success") {
+        String jenis = doc["jenis_sepatu"];
+        int waktu = doc["waktu_menit"];
+        
+        Serial.println("🔥 Perintah eksekusi diterima dari Cloud!");
+        mulaiPengeringVercel(jenis, waktu); 
+      }
+    }
+  }
+  http.end();
+}
+
+// ======================================================
+// SETUP
+// ======================================================
+void setup() {
+  Serial.begin(115200);
+
+  dht.begin();
+  pinMode(DHTPIN, INPUT_PULLUP);
+
+  pinMode(RELAY1_PIN, OUTPUT);
+  pinMode(RELAY2_PIN, OUTPUT);
+  pinMode(DRYER_PIN,  OUTPUT);
+  pinMode(LAMP_PIN,   OUTPUT);
+  matikanRelay();
+
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0); lcd.print("Connecting");
+  lcd.setCursor(0, 1); lcd.print("WiFi...");
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✅ WiFi Connected: " + WiFi.localIP().toString());
+
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("System Ready");
+
+  loadData();
+}
+
+// ======================================================
+// LOOP
+// ======================================================
+void loop() {
+  // 1. Jaga Koneksi WiFi
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFi.disconnect(true);
+    WiFi.begin(ssid, password);
+    unsigned long tReconnectStart = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - tReconnectStart < WIFI_RECONNECT_TIMEOUT_MS) {
+      delay(10);
+    }
+    if (WiFi.status() != WL_CONNECTED) return;
+  }
+
+  // 2. Baca Sensor
+  float suhu       = dht.readTemperature();
+  float kelembaban = dht.readHumidity();
+
+  if (isnan(suhu) || isnan(kelembaban)) {
+    lcd.setCursor(0, 0); lcd.print("Sensor Error!");
+    sedangStabilKering = false;
+    delay(2000);
+    return;
+  }
+
+  // 3. Polling ke Vercel (Hanya saat Standby)
+  if (!pengeringAktif && millis() - lastTimeApiRan > API_POLL_RATE) {
+    cekPerintahVercel(suhu, kelembaban);
+    lastTimeApiRan = millis();
+  }
+
+  // 4. Kalkulasi Waktu & Auto-Save
+  unsigned long waktuBerjalan = pengeringAktif ? (millis() - waktuMulai) / 60000 : 0;
+  
+  if (pengeringAktif && millis() - lastSave >= 60000) {
+    simpanData();
+    lastSave = millis();
+  }
+
+  // 5. Deteksi Kering (Logika Asli Anda Dipertahankan)
+  bool kondisiKeringSaatIni = pengeringAktif
+                            && (suhu >= (suhuTarget - TOLERANSI_SUHU_KERING))
+                            && (kelembaban <= getBatasKelembapanKering(jenisSepatu));
+
+  if (kondisiKeringSaatIni) {
+    if (!sedangStabilKering) {
+      sedangStabilKering = true;
+      waktuMulaiStabil   = millis();
+    } else if (millis() - waktuMulaiStabil >= STABIL_MINIMAL_MS) {
+      pengeringAktif      = false;
+      sedangStabilKering  = false;
+      matikanRelay();
+
+      preferences.begin("dryer", false);
+      preferences.clear();
+      preferences.end();
+      
+      Serial.println("🎉 Pengeringan Selesai (Sensor Kering)!");
+      delay(2000);
+      return;
+    }
+  } else {
+    sedangStabilKering = false;
+  }
+
+  // 6. Deteksi Batas Waktu Habis
+  if (pengeringAktif && waktuBerjalan >= (unsigned long)waktuTargetMenit) {
+    pengeringAktif = false;
+    sedangStabilKering = false;
+    matikanRelay();
+    preferences.begin("dryer", false);
+    preferences.clear();
+    preferences.end();
+    Serial.println("🎉 Pengeringan Selesai (Batas Waktu)!");
+  }
+
+  // 7. Kontrol Suhu / Termostat
+  if (pengeringAktif) {
+    if (suhu <= (suhuTarget - 1.0) && !relayMenyala) {
+      digitalWrite(RELAY1_PIN, LOW);
+      digitalWrite(RELAY2_PIN, LOW);
+      digitalWrite(DRYER_PIN,  LOW);
+      digitalWrite(LAMP_PIN,   LOW);
+      relayMenyala = true;
+    } else if (suhu >= (suhuTarget + 0.5) && relayMenyala) {
+      matikanRelay();
+    }
+  }
+
+  // 8. Tampilan LCD
+  if (millis() - lastLCD > 3000) {
+    lcdSlide = !lcdSlide;
+    lastLCD  = millis();
+    lcd.clear();
+  }
+
+  if (!lcdSlide) {
+    lcd.setCursor(0, 0);
+    lcd.print("Suhu: "); lcd.print(suhu, 1); lcd.print((char)223); lcd.print("C");
+    lcd.setCursor(0, 1);
+    lcd.print("Lembap: "); lcd.print(kelembaban, 1); lcd.print("%");
+  } else {
+    lcd.setCursor(0, 0);
+    if (!pengeringAktif) {
+      lcd.print("Standby        ");
+    } else {
+      String ln1 = "Sepatu " + jenisSepatu;
+      while (ln1.length() < 16) ln1 += " ";
+      lcd.print(ln1.substring(0, 16));
+      
+      lcd.setCursor(0, 1);
+      lcd.print(relayMenyala ? "Mengeringkan    " : "Menunggu Suhu   ");
+    }
+  }
+
+  yield();
+}
