@@ -5,6 +5,8 @@ from pathlib import Path
 from flask import Flask, request, jsonify
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from datetime import datetime
+import dateutil.parser
 
 
 # ============================================================
@@ -173,7 +175,7 @@ def predict_esp32():
     # ==========================================
     if text in ["📊 Status", "Status", "/status"]:
         # Ambil baris data terbaru dari user ini
-        response = supabase.table("NAMA_TABEL_ANDA").select("*").eq("chat_id", chat_id).order("id", desc=True).limit(1).execute()
+        response = supabase.table("telemetry").select("*").eq("chat_id", chat_id).order("id", desc=True).limit(1).execute()
         
         if len(response.data) > 0:
             sesi = response.data[0]
@@ -187,7 +189,14 @@ def predict_esp32():
                 # Tentukan ikon relay
                 ikon_relay = "🔥 Mengeringkan" if relay_nyala else "🌡️ Menunggu Suhu Turun"
                 jenis = sesi.get("jenis_sepatu", "-")
-                
+
+                waktu_raw = sesi.get("updated_at")
+                waktu_format = "Tidak diketahui"
+
+                if waktu_raw:
+                    dt = dateutil.parser.isoparse(waktu_raw)
+                    waktu_format = dt.strftime("%d-%m-%Y %H:%M:%S")
+
                 pesan = (
                     f"📊 *STATUS SMART SHOE DRYER*\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
