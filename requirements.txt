@@ -6,3 +6,4 @@ requests==2.31.0
 supabase
 httpx
 websockets>=13.0
+python-dotenv
