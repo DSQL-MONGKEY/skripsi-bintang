@@ -6,6 +6,9 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 
+unsigned long lastTelemetryTime = 0;
+const unsigned long TELEMETRY_RATE = 60000;
+
 // ======================================================
 // WIFI & API URL VERCEL
 // ======================================================
@@ -13,7 +16,7 @@ const char* ssid     = "KOSANBUTIA_LT2";
 const char* password = "01234321";
 
 // PENTING: Ganti dengan URL domain Vercel Anda
-const char* api_url  = "https://[NAMA_DOMAIN_VERCEL_ANDA].vercel.app/api/predict";
+const char* api_url  = "https://skripsi-bintang.vercel.app/api/predict";
 
 // ======================================================
 // PREFERENCES (SAVE/LOAD DATA)
@@ -92,6 +95,7 @@ void matikanRelay() {
   relayMenyala = false;
 }
 
+
 // ======================================================
 // SAVE DATA (UNTUK RECOVERY MATI LAMPU)
 // ======================================================
@@ -157,6 +161,28 @@ int jenisSepatuKeKode(String jenis) {
 float getBatasKelembapanKering(String jenis) {
   int kode = jenisSepatuKeKode(jenis);
   return KELEMBAPAN_AKHIR_TARGET[kode] + MARGIN_KELEMBABAN_KERING;
+}
+
+void kirimTelemetri(float suhu, float kelembapan, int sisaWaktu, bool relay) {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  // Ganti dengan domain Vercel Anda
+  http.begin("https://skripsi-bintang.vercel.app/api/telemetry");
+  http.addHeader("Content-Type", "application/json");
+
+  // Susun payload JSON
+  String payload = "{\"suhu\":" + String(suhu, 1) + 
+                   ",\"kelembapan\":" + String(kelembapan, 1) + 
+                   ",\"sisa_waktu\":" + String(sisaWaktu) + 
+                   ",\"relay_menyala\":" + (relay ? "true" : "false") + "}";
+  
+  int responseCode = http.POST(payload);
+  http.end();
+  
+  if (responseCode == 200) {
+    Serial.println("📡 Laporan telemetri berhasil dikirim ke Cloud!");
+  }
 }
 
 // ======================================================
@@ -292,6 +318,16 @@ void loop() {
 
   // 4. Kalkulasi Waktu & Auto-Save
   unsigned long waktuBerjalan = pengeringAktif ? (millis() - waktuMulai) / 60000 : 0;
+
+  // -- KODE BARU DIMULAI DARI SINI --
+  int sisaWaktu = waktuTargetMenit - waktuBerjalan;
+  if (sisaWaktu < 0) sisaWaktu = 0;
+
+  // Lakukan pengiriman telemetri jika mesin aktif DAN sudah lewat 60 detik
+  if (pengeringAktif && (millis() - lastTelemetryTime > TELEMETRY_RATE)) {
+     kirimTelemetri(suhu, kelembaban, sisaWaktu, relayMenyala);
+     lastTelemetryTime = millis();
+  }
   
   if (pengeringAktif && millis() - lastSave >= 60000) {
     simpanData();

@@ -120,6 +120,21 @@ def telegram_webhook():
     
     return jsonify({"status": "ok"}), 200
 
+@app.route('/api/telemetry', methods=['POST'])
+def telemetry():
+    data = request.json
+    
+    # Update data pada sesi yang sedang berjalan (aktif)
+    # Asumsi: Saat ini hanya ada 1 alat yang berjalan pada satu waktu
+    supabase.table("NAMA_TABEL_ANDA").update({
+        "suhu_terakhir": data.get("suhu"),
+        "kelembapan_terakhir": data.get("kelembapan"),
+        "sisa_waktu": data.get("sisa_waktu"),
+        "relay_menyala": data.get("relay_menyala")
+    }).eq("status", "aktif").execute()
+    
+    return jsonify({"status": "updated"}), 200
+
 # ============================================================
 # ROUTE 2: API UNTUK ESP32
 # Menerima data sensor, mengecek antrean, melakukan prediksi
@@ -149,8 +164,54 @@ def predict_esp32():
 
     sesi_aktif = sesi[0]
     jenis_sepatu = sesi_aktif["jenis_sepatu"]
+    text = message.get("text", "")
     chat_id = sesi_aktif["chat_id"]
     record_id = sesi_aktif["id"]
+
+    # ==========================================
+    # LOGIKA CEK STATUS
+    # ==========================================
+    if text in ["📊 Status", "Status", "/status"]:
+        # Ambil baris data terbaru dari user ini
+        response = supabase.table("NAMA_TABEL_ANDA").select("*").eq("chat_id", chat_id).order("id", desc=True).limit(1).execute()
+        
+        if len(response.data) > 0:
+            sesi = response.data[0]
+            
+            if sesi["status"] == "aktif":
+                suhu = sesi.get("suhu_terakhir", "Menunggu data...")
+                kelembapan = sesi.get("kelembapan_terakhir", "Menunggu data...")
+                sisa = sesi.get("sisa_waktu", "Menunggu data...")
+                relay_nyala = sesi.get("relay_menyala")
+                
+                # Tentukan ikon relay
+                ikon_relay = "🔥 Mengeringkan" if relay_nyala else "🌡️ Menunggu Suhu Turun"
+                jenis = sesi.get("jenis_sepatu", "-")
+                
+                pesan = (
+                    f"📊 *STATUS SMART SHOE DRYER*\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"👟 Jenis : {jenis}\n"
+                    f"🌡️ Suhu : {suhu} °C\n"
+                    f"💧 Lembap : {kelembapan} %\n"
+                    f"⏳ Sisa Waktu : {sisa} menit\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"🔌 Status Mesin : {ikon_relay}"
+                )
+                
+            elif sesi["status"] == "menunggu_sensor":
+                pesan = "⏳ Mesin sedang memanaskan dan melakukan kalkulasi ML. Tunggu sebentar..."
+            else:
+                pesan = "💤 Mesin dalam keadaan Standby.\nKetik /start untuk memulai pengeringan baru."
+        else:
+            pesan = "💤 Belum ada riwayat pengeringan.\nKetik /start untuk memulai."
+
+        # Fungsi kirim pesan ke telegram (sesuaikan dengan fungsi requests.post yang sudah Anda miliki)
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": pesan, "parse_mode": "Markdown"}
+        )
+        return jsonify({"status": "success"}), 200
 
     try:
         # 2. Proses Machine Learning
