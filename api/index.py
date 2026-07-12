@@ -65,6 +65,17 @@ def send_telegram_message(chat_id, text):
     requests.post(url, json=payload, timeout=5)
 
 # ============================================================
+# ROUTE 0: HEALTH CHECK (DEFAULT HOME)
+# ============================================================
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        "status": "online",
+        "message": "Smart Shoe Dryer API is running perfectly on Vercel Serverless!",
+        "version": "1.0"
+    }), 200
+
+# ============================================================
 # ROUTE 1: WEBHOOK TELEGRAM
 # Menerima input dari pengguna dan menyimpan status ke Supabase
 # ============================================================
