@@ -113,6 +113,7 @@ def telegram_webhook():
             chat_id, 
             f"👟 Jenis sepatu *{jenis}* dipilih.\n\n⏳ Menunggu mesin pengering dinyalakan dan mengirim data sensor..."
         )
+        return jsonify({"status": "ignored", "message": "Command tidak memicu aksi jenis sepatu"}), 200
     
     elif text == "/start":
         send_telegram_message(
@@ -142,7 +143,7 @@ def telegram_webhook():
     # ==========================================
     elif text in ["📊 Status", "Status", "/status"]:
         # Ambil baris data terbaru dari user ini
-        response = supabase.table("telemetry").select("*").eq("chat_id", chat_id).order("id", desc=True).limit(1).execute()
+        response = supabase.table("sesi_pengeringan").select("*").eq("chat_id", chat_id).order("id", desc=True).limit(1).execute()
         
         if len(response.data) > 0:
             sesi = response.data[0]
@@ -246,11 +247,11 @@ def predict_esp32():
         return jsonify({'error': 'Model ML gagal dimuat di server'}), 500
 
     data = request.get_json()
-    if not data or 'suhu_awal' not in data or 'kelembapan_awal' not in data:
+    if not data or 'suhu_sekarang' not in data or 'kelembapan_sekarang' not in data:
         return jsonify({'error': 'Payload tidak valid'}), 400
 
-    suhu = float(data['suhu_awal'])
-    kelembapan = float(data['kelembapan_awal'])
+    suhu = float(data['suhu_sekarang'])
+    kelembapan = float(data['kelembapan_sekarang'])
 
     # 1. Cari antrean pengeringan di Supabase
     if not supabase:
