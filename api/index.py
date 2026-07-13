@@ -119,61 +119,28 @@ def telegram_webhook():
             chat_id, 
             "👋 *Selamat datang di SMART SHOE DRYER!*\n\nSilakan ketik atau pilih dari keyboard:\n👟 Mesh\n🧵 Kanvas\n👢 Kulit"
         )
-    
-    return jsonify({"status": "ok"}), 200
-
-@app.route('/api/telemetry', methods=['POST'])
-def telemetry():
-    data = request.json
-    
-    # Update data pada sesi yang sedang berjalan (aktif)
-    # Asumsi: Saat ini hanya ada 1 alat yang berjalan pada satu waktu
-    supabase.table("NAMA_TABEL_ANDA").update({
-        "suhu_terakhir": data.get("suhu"),
-        "kelembapan_terakhir": data.get("kelembapan"),
-        "sisa_waktu": data.get("sisa_waktu"),
-        "relay_menyala": data.get("relay_menyala")
-    }).eq("status", "aktif").execute()
-    
-    return jsonify({"status": "updated"}), 200
-
-# ============================================================
-# ROUTE 2: API UNTUK ESP32
-# Menerima data sensor, mengecek antrean, melakukan prediksi
-# ============================================================
-@app.route('/api/predict', methods=['POST'])
-def predict_esp32():
-    if not model or not encoder_jenis:
-        return jsonify({'error': 'Model ML gagal dimuat di server'}), 500
-
-    data = request.get_json()
-    if not data or 'suhu_awal' not in data or 'kelembapan_awal' not in data:
-        return jsonify({'error': 'Payload tidak valid'}), 400
-
-    suhu = float(data['suhu_awal'])
-    kelembapan = float(data['kelembapan_awal'])
-
-    # 1. Cari antrean pengeringan di Supabase
-    if not supabase:
-        return jsonify({'error': 'Koneksi database terputus'}), 500
+    elif text in ["❌ Batal", "/cancel", "Batal"]:
+        # 1. Cari apakah ada mesin yang sedang aktif atau menunggu untuk user ini
+        response = supabase.table("sesi_pengeringan").select("id, status").eq("chat_id", chat_id).in_("status", ["aktif", "menunggu_sensor"]).execute()
         
-    response = supabase.table("sesi_pengeringan").select("*").eq("status", "menunggu_sensor").order("updated_at", desc=True).limit(1).execute()
-    sesi = response.data
-
-    # Jika tidak ada user yang request via Telegram, abaikan data sensor ESP32
-    if not sesi:
-        return jsonify({"status": "ignored", "message": "Tidak ada sesi menunggu dari Telegram"}), 200
-
-    sesi_aktif = sesi[0]
-    jenis_sepatu = sesi_aktif["jenis_sepatu"]
-    text = message.get("text", "")
-    chat_id = sesi_aktif["chat_id"]
-    record_id = sesi_aktif["id"]
+        if len(response.data) > 0:
+            # 2. Jika ada, ubah statusnya menjadi 'dibatalkan'
+            supabase.table("sesi_pengeringan").update({"status": "dibatalkan"}).eq("chat_id", chat_id).in_("status", ["aktif", "menunggu_sensor"]).execute()
+            
+            pesan = "🛑 Proses pengeringan berhasil DIBATALKAN. Mesin akan segera dimatikan."
+        else:
+            pesan = "⚠️ Tidak ada proses pengeringan yang sedang berjalan."
+            
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": pesan}
+        )
+        return jsonify({"status": "success"}), 200
 
     # ==========================================
     # LOGIKA CEK STATUS
     # ==========================================
-    if text in ["📊 Status", "Status", "/status"]:
+    elif text in ["📊 Status", "Status", "/status"]:
         # Ambil baris data terbaru dari user ini
         response = supabase.table("telemetry").select("*").eq("chat_id", chat_id).order("id", desc=True).limit(1).execute()
         
@@ -181,8 +148,8 @@ def predict_esp32():
             sesi = response.data[0]
             
             if sesi["status"] == "aktif":
-                suhu = sesi.get("suhu_terakhir", "Menunggu data...")
-                kelembapan = sesi.get("kelembapan_terakhir", "Menunggu data...")
+                suhu = sesi.get("suhu_sekarang", "Menunggu data...")
+                kelembapan = sesi.get("kelembapan_sekarang", "Menunggu data...")
                 sisa = sesi.get("sisa_waktu", "Menunggu data...")
                 relay_nyala = sesi.get("relay_menyala")
                 
@@ -211,7 +178,7 @@ def predict_esp32():
             elif sesi["status"] == "menunggu_sensor":
                 pesan = "⏳ Mesin sedang memanaskan dan melakukan kalkulasi ML. Tunggu sebentar..."
             else:
-                pesan = "💤 Mesin dalam keadaan Standby.\nKetik /start untuk memulai pengeringan baru."
+                pesan = "💤 Mesin dalam keadaan Standby.\nKetik /predict untuk memulai pengeringan baru."
         else:
             pesan = "💤 Belum ada riwayat pengeringan.\nKetik /start untuk memulai."
 
@@ -220,7 +187,13 @@ def predict_esp32():
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": chat_id, "text": pesan, "parse_mode": "Markdown"}
         )
-        return jsonify({"status": "success"}), 200
+        return jsonify({"status": "success"}), 200    
+
+    sesi_aktif = sesi[0]
+    jenis_sepatu = sesi_aktif["jenis_sepatu"]
+    text = message.get("text", "")
+    chat_id = sesi_aktif["chat_id"]
+    record_id = sesi_aktif["id"]
 
     try:
         # 2. Proses Machine Learning
@@ -233,9 +206,9 @@ def predict_esp32():
 
         # 3. Update status database menjadi proses_kering
         supabase.table("sesi_pengeringan").update({
-            "status": "proses_kering",
-            "suhu_terakhir": suhu,
-            "kelembapan_terakhir": kelembapan,
+            "status": "aktif",
+            "suhu_sekarang": suhu,
+            "kelembapan_sekarang": kelembapan,
             "waktu_prediksi": prediksi_waktu
         }).eq("id", record_id).execute()
 
@@ -256,11 +229,101 @@ def predict_esp32():
         return jsonify({
             "status": "success", 
             "waktu_menit": prediksi_waktu,
-            "jenis_sepatu": jenis_sepatu  # Tambahkan baris ini
+            "jenis_sepatu": jenis_sepatu
         }), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+    return jsonify({"status": "ok"}), 200
+# ============================================================
+# ROUTE 2: API UNTUK ESP32
+# Menerima data sensor, mengecek antrean, melakukan prediksi
+# ============================================================
+@app.route('/api/predict', methods=['POST'])
+def predict_esp32():
+    if not model or not encoder_jenis:
+        return jsonify({'error': 'Model ML gagal dimuat di server'}), 500
+
+    data = request.get_json()
+    if not data or 'suhu_awal' not in data or 'kelembapan_awal' not in data:
+        return jsonify({'error': 'Payload tidak valid'}), 400
+
+    suhu = float(data['suhu_awal'])
+    kelembapan = float(data['kelembapan_awal'])
+
+    # 1. Cari antrean pengeringan di Supabase
+    if not supabase:
+        return jsonify({'error': 'Koneksi database terputus'}), 500
+        
+    response = supabase.table("sesi_pengeringan").select("*").eq("status", "menunggu_sensor").order("updated_at", desc=True).limit(1).execute()
+    sesi = response.data
+    
+
+    # Jika tidak ada user yang request via Telegram, abaikan data sensor ESP32
+    if not sesi:
+        return jsonify({"status": "ignored", "message": "Tidak ada sesi menunggu dari Telegram"}), 200
+
+    sesi_aktif = sesi[0]
+    jenis_sepatu = sesi_aktif["jenis_sepatu"]
+    chat_id = sesi_aktif["chat_id"]
+    record_id = sesi_aktif["id"]
+
+    try:
+        # 2. Proses Machine Learning
+        jenis_en = MAPPING_JENIS.get(jenis_sepatu, "Canvas") # Fallback safety
+        jenis_enc = encoder_jenis.transform([jenis_en])[0]
+        
+        # Urutan fitur harus sama dengan X_train
+        features = [[jenis_enc, suhu, kelembapan]]
+        prediksi_waktu = int(model.predict(features)[0])
+
+        # 3. Update status database menjadi proses_kering
+        supabase.table("sesi_pengeringan").update({
+            "status": "aktif",
+            "suhu_sekarang": suhu,
+            "kelembapan_sekarang": kelembapan,
+            "waktu_prediksi": prediksi_waktu
+        }).eq("id", record_id).execute()
+
+        # 4. Kirim notifikasi final ke pengguna Telegram
+        pesan = (
+            f"✅ *PENGERING AKTIF!*\n"
+            f"───────────────\n"
+            f"👟 Jenis    : {jenis_sepatu}\n"
+            f"🌡️ Suhu     : {suhu} °C\n"
+            f"💧 Lembap   : {kelembapan} %\n"
+            f"🔮 Prediksi : {prediksi_waktu} menit\n"
+            f"───────────────\n"
+            f"🔥 Pengering sedang berjalan!"
+        )
+        send_telegram_message(chat_id, pesan)
+
+        # 5. Balas ESP32
+        return jsonify({
+            "status": "success", 
+            "waktu_menit": prediksi_waktu,
+            "jenis_sepatu": jenis_sepatu
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/telemetry', methods=['POST'])
+def telemetry():
+    data = request.json
+    
+    # Update data pada sesi yang sedang berjalan (aktif)
+    # Asumsi: Saat ini hanya ada 1 alat yang berjalan pada satu waktu
+    supabase.table("sesi_pengeringan").update({
+        "suhu_sekarang": data.get("suhu"),
+        "kelembapan_sekarang": data.get("kelembapan"),
+        "sisa_waktu": data.get("sisa_waktu"),
+        "relay_menyala": data.get("relay_menyala")
+    }).eq("status", "aktif").execute()
+    
+    return jsonify({"status": "updated"}), 200
+
 
 # Untuk testing lokal
 if __name__ == '__main__':
