@@ -66,6 +66,58 @@ def send_telegram_message(chat_id, text):
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     requests.post(url, json=payload, timeout=5)
 
+@app.route('/api/device_online', methods=['POST'])
+def device_online():
+    try:
+        # 1. Ambil chat_id dari user terakhir yang menggunakan alat ini
+        if not supabase:
+            return jsonify({'error': 'Koneksi database terputus'}), 500
+            
+        response = supabase.table("sesi_pengeringan").select("chat_id").order("id", desc=True).limit(1).execute()
+        
+        if not response.data:
+            return jsonify({"status": "ignored", "message": "Belum ada riwayat chat_id"}), 200
+            
+        chat_id = response.data[0]["chat_id"]
+
+        # 2. Format pesan sesuai gambar referensi
+        pesan = (
+            "👋 *Selamat datang di SMART SHOE DRYER!*\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "Silakan pilih jenis sepatu:\n\n"
+            "👟 *Mesh* — Sepatu kain/rajut\n"
+            "🧵 *Kanvas* — Sepatu kanvas\n"
+            "🥾 *Kulit* — Sepatu kulit\n"
+            "📊 *Status* — Lihat status pengering"
+        )
+
+        # 3. Opsional: Sertakan custom keyboard Telegram agar tombol muncul
+        reply_markup = {
+            "keyboard": [
+                [{"text": "👟 Mesh"}, {"text": "🧵 Kanvas"}],
+                [{"text": "🥾 Kulit"}, {"text": "📊 Status"}],
+                [{"text": "❌ Batal"}]
+            ],
+            "resize_keyboard": True,
+            "one_time_keyboard": False
+        }
+
+        # 4. Tembak API Telegram
+        payload = {
+            "chat_id": chat_id,
+            "text": pesan,
+            "parse_mode": "Markdown",
+            "reply_markup": reply_markup
+        }
+        
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload)
+
+        return jsonify({"status": "success", "message": "Welcome message sent"}), 200
+
+    except Exception as e:
+        print(f"Error Device Online: {e}")
+        return jsonify({"error": str(e)}), 500
+
 # ============================================================
 # ROUTE 0: HEALTH CHECK (DEFAULT HOME)
 # ============================================================
