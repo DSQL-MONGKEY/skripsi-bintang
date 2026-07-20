@@ -170,185 +170,130 @@ def home():
 # ROUTE 1: WEBHOOK TELEGRAM
 # Menerima input dari pengguna dan menyimpan status ke Supabase
 # ============================================================
+
 @app.route('/api/webhook_telegram', methods=['POST'])
 def telegram_webhook():
     update = request.get_json()
     
+    # Validasi Input Telegram
     if not update or "message" not in update or "text" not in update["message"]:
         return jsonify({"status": "ok"}), 200
     
     chat_id = update["message"]["chat"]["id"]
     text = update["message"]["text"].strip()
 
-    # Parsing input pengguna
+    # Parsing input pengguna (Pilih Sepatu)
     jenis = None
     if "Mesh" in text: jenis = "Mesh"
     elif "Kanvas" in text: jenis = "Kanvas"
     elif "Kulit" in text: jenis = "Kulit"
 
     if jenis:
-        # Masukkan ke antrean database
-        data = {
-            "chat_id": chat_id,
-            "jenis_sepatu": jenis,
-            "status": "menunggu_sensor"
-        }
-        
-        # Eksekusi insert ke tabel sesi_pengeringan
-        if supabase:
-            supabase.table("sesi_pengeringan").insert(data).execute()
-        
-        send_telegram_message(
-            chat_id, 
-            f"👟 Jenis sepatu *{jenis}* dipilih.\n\n⏳ Menunggu mesin pengering dinyalakan dan mengirim data sensor..."
-        )
-        return jsonify({"status": "ignored", "message": "Command tidak memicu aksi jenis sepatu"}), 200
+        try:
+            data = {
+                "chat_id": chat_id,
+                "jenis_sepatu": jenis,
+                "status": "menunggu_sensor"
+            }
+            if supabase:
+                supabase.table("sesi_pengeringan").insert(data).execute()
+            
+            send_telegram_message(
+                chat_id, 
+                f"👟 Jenis sepatu *{jenis}* dipilih.\n\n⏳ Menunggu mesin pengering dinyalakan dan mengirim data sensor..."
+            )
+            return jsonify({"status": "success", "message": f"Pesanan {jenis} masuk antrean"}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
     
+    # Command: Start
     elif text == "/start":
         send_telegram_message(
             chat_id, 
             "👋 *Selamat datang di SMART SHOE DRYER!*\n\nSilakan ketik atau pilih dari keyboard:\n👟 Mesh\n🧵 Kanvas\n👢 Kulit"
         )
+        return jsonify({"status": "success"}), 200
+        
+    # Command: Batal
     elif text in ["❌ Batal", "/cancel", "Batal"]:
-        # 1. Cari apakah ada mesin yang sedang aktif atau menunggu untuk user ini
         response = supabase.table("sesi_pengeringan").select("id, status").eq("chat_id", chat_id).in_("status", ["aktif", "menunggu_sensor"]).execute()
         
         if len(response.data) > 0:
-            # 2. Jika ada, ubah statusnya menjadi 'dibatalkan'
             supabase.table("sesi_pengeringan").update({"status": "dibatalkan"}).eq("chat_id", chat_id).in_("status", ["aktif", "menunggu_sensor"]).execute()
-            
             pesan = "🛑 Proses pengeringan berhasil DIBATALKAN. Mesin akan segera dimatikan."
         else:
             pesan = "⚠️ Tidak ada proses pengeringan yang sedang berjalan."
             
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": pesan}
-        )
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": pesan})
         return jsonify({"status": "success"}), 200
     
+    # Command: History / Show
     elif text.lower() in ["show", "history-all"]:
-        # Ambil 5 riwayat terakhir agar pesan Telegram tidak terlalu panjang
         response = supabase.table("sesi_pengeringan").select("*").eq("chat_id", chat_id).order("id", desc=True).limit(5).execute()
         
         if len(response.data) > 0:
             pesan = "📚 *5 RIWAYAT PENGERINGAN TERAKHIR*\n━━━━━━━━━━━━━━━━━━\n"
             for row in response.data:
-                dt_buat = dateutil.parser.isoparse(row["created_at"]) + timedelta(hours=7)
-                waktu = dt_buat.strftime('%d %b %H:%M')
-                jenis = row.get("jenis_sepatu", "-")
+                # Blok anti-crash untuk waktu
+                try:
+                    if row.get("created_at"):
+                        dt_buat = dateutil.parser.isoparse(row["created_at"]) + timedelta(hours=7)
+                        waktu = dt_buat.strftime('%d %b %H:%M')
+                    else:
+                        waktu = "Waktu tdk tercatat"
+                except Exception:
+                    waktu = "Format error"
+                    
+                jenis_sepatu = row.get("jenis_sepatu", "-")
                 status = row.get("status", "unknown")
-                durasi = row.get("waktu_prediksi", "-")
+                durasi = row.get("waktu_prediksi_total", "-")
                 
-                # Ikon status bergaya minimalis
                 ikon = "✅" if status == "selesai" else "❌" if status == "dibatalkan" else "🔄"
-                
-                pesan += f"{ikon} *{jenis}* ({durasi} mnt)\n   📅 {waktu} | Status: {status.title()}\n\n"
+                pesan += f"{ikon} *{jenis_sepatu}* ({durasi} mnt)\n   📅 {waktu} | Status: {status.title()}\n\n"
         else:
             pesan = "📭 Belum ada riwayat pengeringan."
             
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": pesan, "parse_mode": "Markdown"})
         return jsonify({"status": "success"}), 200
 
-    # ==========================================
-    # LOGIKA CEK STATUS
-    # ==========================================
+    # Command: Status
     elif text in ["📊 Status", "Status", "/status"]:
-        # Ambil baris data terbaru dari user ini
         response = supabase.table("sesi_pengeringan").select("*").eq("chat_id", chat_id).order("id", desc=True).limit(1).execute()
         
         if len(response.data) > 0:
             sesi = response.data[0]
-            
             if sesi["status"] == "aktif":
                 suhu = sesi.get("suhu_sekarang", "Menunggu data...")
                 kelembapan = sesi.get("kelembapan_sekarang", "Menunggu data...")
                 sisa = sesi.get("sisa_waktu", "Menunggu data...")
                 relay_nyala = sesi.get("relay_menyala")
                 
-                # Tentukan ikon relay
                 ikon_relay = "🔥 Mengeringkan" if relay_nyala else "🌡️ Menunggu Suhu Turun"
-                jenis = sesi.get("jenis_sepatu", "-")
-
-                waktu_raw = sesi.get("updated_at")
-                waktu_format = "Tidak diketahui"
-
-                if waktu_raw:
-                    dt = dateutil.parser.isoparse(waktu_raw)
-                    waktu_format = dt.strftime("%d-%m-%Y %H:%M:%S")
+                jenis_sepatu = sesi.get("jenis_sepatu", "-")
 
                 pesan = (
                     f"📊 *STATUS SMART SHOE DRYER*\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
-                    f"👟 Jenis : {jenis}\n"
+                    f"👟 Jenis : {jenis_sepatu}\n"
                     f"🌡️ Suhu : {suhu} °C\n"
                     f"💧 Lembap : {kelembapan} %\n"
                     f"⏳ Sisa Waktu : {sisa} menit\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"🔌 Status Mesin : {ikon_relay}"
                 )
-                
             elif sesi["status"] == "menunggu_sensor":
                 pesan = "⏳ Mesin sedang memanaskan dan melakukan kalkulasi ML. Tunggu sebentar..."
             else:
-                pesan = "💤 Mesin dalam keadaan Standby.\nKetik /predict untuk memulai pengeringan baru."
+                pesan = "💤 Mesin dalam keadaan Standby.\nKetik /start untuk memulai pengeringan baru."
         else:
             pesan = "💤 Belum ada riwayat pengeringan.\nKetik /start untuk memulai."
 
-        # Fungsi kirim pesan ke telegram (sesuaikan dengan fungsi requests.post yang sudah Anda miliki)
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": pesan, "parse_mode": "Markdown"}
-        )
-        return jsonify({"status": "success"}), 200    
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": pesan, "parse_mode": "Markdown"})
+        return jsonify({"status": "success"}), 200 
 
-    sesi_aktif = sesi[0]
-    jenis_sepatu = sesi_aktif["jenis_sepatu"]
-    text = message.get("text", "")
-    chat_id = sesi_aktif["chat_id"]
-    record_id = sesi_aktif["id"]
+    # SAFETY NET: Jika command tidak dikenali
+    return jsonify({"status": "ignored", "message": "Command tidak dikenali"}), 200
 
-    try:
-        # 2. Proses Machine Learning
-        jenis_en = MAPPING_JENIS.get(jenis_sepatu, "Canvas") # Fallback safety
-        jenis_enc = encoder_jenis.transform([jenis_en])[0]
-        
-        # Urutan fitur harus sama dengan X_train
-        features = [[jenis_enc, suhu, kelembapan]]
-        prediksi_waktu = int(model.predict(features)[0])
-
-        # 3. Update status database menjadi proses_kering
-        supabase.table("sesi_pengeringan").update({
-            "status": "aktif",
-            "suhu_sekarang": suhu,
-            "kelembapan_sekarang": kelembapan,
-            "waktu_prediksi": prediksi_waktu
-        }).eq("id", record_id).execute()
-
-        # 4. Kirim notifikasi final ke pengguna Telegram
-        pesan = (
-            f"✅ *PENGERING AKTIF!*\n"
-            f"───────────────\n"
-            f"👟 Jenis    : {jenis_sepatu}\n"
-            f"🌡️ Suhu     : {suhu} °C\n"
-            f"💧 Lembap   : {kelembapan} %\n"
-            f"🔮 Prediksi : {prediksi_waktu} menit\n"
-            f"───────────────\n"
-            f"🔥 Pengering sedang berjalan!"
-        )
-        send_telegram_message(chat_id, pesan)
-
-        # 5. Balas ESP32
-        return jsonify({
-            "status": "success", 
-            "waktu_menit": prediksi_waktu,
-            "jenis_sepatu": jenis_sepatu
-        }), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-    return jsonify({"status": "ok"}), 200
 # ============================================================
 # ROUTE 2: API UNTUK ESP32
 # Menerima data sensor, mengecek antrean, melakukan prediksi
