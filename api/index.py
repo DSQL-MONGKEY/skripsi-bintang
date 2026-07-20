@@ -6,7 +6,8 @@ from flask import Flask, request, jsonify
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from datetime import datetime
-import dateutil.parser
+from datetime import timedelta
+import dateutil.parser 
 
 
 # ============================================================
@@ -69,50 +70,86 @@ def send_telegram_message(chat_id, text):
 @app.route('/api/device_online', methods=['POST'])
 def device_online():
     try:
-        # 1. Ambil chat_id dari user terakhir yang menggunakan alat ini
+        # Ambil payload suhu dan kelembapan dari ESP32 saat booting
+        data = request.get_json() or {}
+        suhu = float(data.get('suhu', 0))
+        kelembapan = float(data.get('kelembapan', 0))
+
         if not supabase:
             return jsonify({'error': 'Koneksi database terputus'}), 500
+
+        # 1. Cek apakah ada sesi pengeringan yang masih 'aktif'
+        response = supabase.table("sesi_pengeringan").select("*").eq("status", "aktif").order("id", desc=True).limit(1).execute()
+
+        if response.data:
+            # ==========================================
+            # SKENARIO A: RECOVERY MODE AKTIF
+            # ==========================================
+            sesi = response.data[0]
+            chat_id = sesi["chat_id"]
+            record_id = sesi["id"]
+            jenis_sepatu = sesi["jenis_sepatu"]
             
-        response = supabase.table("sesi_pengeringan").select("chat_id").order("id", desc=True).limit(1).execute()
-        
-        if not response.data:
-            return jsonify({"status": "ignored", "message": "Belum ada riwayat chat_id"}), 200
+            # Formatting Waktu (Konversi UTC ke WIB +7)
+            dt_buat = dateutil.parser.isoparse(sesi["created_at"]) + timedelta(hours=7)
+            dt_update = dateutil.parser.isoparse(sesi["updated_at"]) + timedelta(hours=7)
             
-        chat_id = response.data[0]["chat_id"]
+            # Prediksi Ulang Berdasarkan Sensor Terbaru
+            jenis_en = MAPPING_JENIS.get(jenis_sepatu, "Canvas")
+            jenis_enc = encoder_jenis.transform([jenis_en])[0]
+            features = [[jenis_enc, suhu, kelembapan]]
+            prediksi_baru = int(model.predict(features)[0])
 
-        # 2. Format pesan sesuai gambar referensi
-        pesan = (
-            "👋 *Selamat datang di SMART SHOE DRYER!*\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "Silakan pilih jenis sepatu:\n\n"
-            "👟 *Mesh* — Sepatu kain/rajut\n"
-            "🧵 *Kanvas* — Sepatu kanvas\n"
-            "🥾 *Kulit* — Sepatu kulit\n"
-            "📊 *Status* — Lihat status pengering"
-        )
+            # Update database dengan waktu prediksi hasil recovery
+            supabase.table("sesi_pengeringan").update({
+                "waktu_prediksi": prediksi_baru,
+                "sisa_waktu": prediksi_baru,
+                "suhu_sekarang": suhu,
+                "kelembapan_sekarang": kelembapan
+            }).eq("id", record_id).execute()
 
-        # 3. Opsional: Sertakan custom keyboard Telegram agar tombol muncul
-        reply_markup = {
-            "keyboard": [
-                [{"text": "👟 Mesh"}, {"text": "🧵 Kanvas"}],
-                [{"text": "🥾 Kulit"}, {"text": "📊 Status"}],
-                [{"text": "❌ Batal"}]
-            ],
-            "resize_keyboard": True,
-            "one_time_keyboard": False
-        }
+            pesan = (
+                f"⚠️ *RECOVERY MODE: SISTEM DIPULIHKAN!*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"Sesi sebelumnya terputus akibat alat mati/restart.\n\n"
+                f"👟 Jenis : {jenis_sepatu}\n"
+                f"🕒 Mulai Awal : {dt_buat.strftime('%d-%m-%Y %H:%M')}\n"
+                f"🛑 Terakhir Aktif : {dt_update.strftime('%d-%m-%Y %H:%M')}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🔄 Prediksi Baru : {prediksi_baru} menit\n"
+                f"(Dihitung ulang berdasarkan suhu saat ini: {suhu}°C)"
+            )
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": pesan, "parse_mode": "Markdown"})
 
-        # 4. Tembak API Telegram
-        payload = {
-            "chat_id": chat_id,
-            "text": pesan,
-            "parse_mode": "Markdown",
-            "reply_markup": reply_markup
-        }
-        
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload)
+            # Balas ke ESP32 agar melanjutkan pengeringan
+            return jsonify({
+                "status": "resume",
+                "waktu_menit": prediksi_baru,
+                "jenis_sepatu": jenis_sepatu
+            }), 200
 
-        return jsonify({"status": "success", "message": "Welcome message sent"}), 200
+        else:
+            # ==========================================
+            # SKENARIO B: NORMAL BOOT (STANDBY)
+            # ==========================================
+            res_chat = supabase.table("sesi_pengeringan").select("chat_id").order("id", desc=True).limit(1).execute()
+            if not res_chat.data:
+                return jsonify({"status": "standby"}), 200
+                
+            chat_id = res_chat.data[0]["chat_id"]
+
+            pesan = (
+                "👋 *Selamat datang di SMART SHOE DRYER!*\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "Sistem siap digunakan. Silakan pilih jenis sepatu:\n\n"
+                "👟 *Mesh* — Sepatu kain/rajut\n"
+                "🧵 *Kanvas* — Sepatu kanvas\n"
+                "🥾 *Kulit* — Sepatu kulit\n"
+                "📊 *Status* — Lihat status pengering"
+            )
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": pesan, "parse_mode": "Markdown"})
+
+            return jsonify({"status": "standby"}), 200
 
     except Exception as e:
         print(f"Error Device Online: {e}")
@@ -188,6 +225,29 @@ def telegram_webhook():
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": chat_id, "text": pesan}
         )
+        return jsonify({"status": "success"}), 200
+    
+    elif text.lower() in ["show", "history-all"]:
+        # Ambil 5 riwayat terakhir agar pesan Telegram tidak terlalu panjang
+        response = supabase.table("sesi_pengeringan").select("*").eq("chat_id", chat_id).order("id", desc=True).limit(5).execute()
+        
+        if len(response.data) > 0:
+            pesan = "📚 *5 RIWAYAT PENGERINGAN TERAKHIR*\n━━━━━━━━━━━━━━━━━━\n"
+            for row in response.data:
+                dt_buat = dateutil.parser.isoparse(row["created_at"]) + timedelta(hours=7)
+                waktu = dt_buat.strftime('%d %b %H:%M')
+                jenis = row.get("jenis_sepatu", "-")
+                status = row.get("status", "unknown")
+                durasi = row.get("waktu_prediksi", "-")
+                
+                # Ikon status bergaya minimalis
+                ikon = "✅" if status == "selesai" else "❌" if status == "dibatalkan" else "🔄"
+                
+                pesan += f"{ikon} *{jenis}* ({durasi} mnt)\n   📅 {waktu} | Status: {status.title()}\n\n"
+        else:
+            pesan = "📭 Belum ada riwayat pengeringan."
+            
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": pesan, "parse_mode": "Markdown"})
         return jsonify({"status": "success"}), 200
 
     # ==========================================
