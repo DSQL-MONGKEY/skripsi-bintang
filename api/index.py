@@ -228,7 +228,7 @@ def telegram_webhook():
         return jsonify({"status": "success"}), 200
     
     # Command: History / Show
-    elif text.lower() in ["show", "history-all"]:
+    elif text.lower() in ["/show", "history-all", "show"]:
         response = supabase.table("sesi_pengeringan").select("*").eq("chat_id", chat_id).order("id", desc=True).limit(5).execute()
         
         if len(response.data) > 0:
