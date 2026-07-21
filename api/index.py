@@ -382,6 +382,43 @@ def telemetry():
     
     return jsonify({"status": "updated"}), 200
 
+# ==========================================
+# ROUTE KHUSUS TRIGGER SELESAI DARI ESP32
+# ==========================================
+@app.route('/api/notify_done', methods=['POST'])
+def notify_done():
+    if not supabase:
+        return jsonify({'error': 'Koneksi database terputus'}), 500
+
+    # Cari sesi yang saat ini sedang aktif
+    response = supabase.table("sesi_pengeringan").select("*").eq("status", "aktif").execute()
+    
+    if len(response.data) > 0:
+        sesi = response.data[0]
+        chat_id = sesi["chat_id"]
+        jenis = sesi.get("jenis_sepatu", "Anda")
+        record_id = sesi["id"]
+        
+        # 1. Update status database menjadi selesai
+        supabase.table("sesi_pengeringan").update({
+            "status": "selesai",
+            "sisa_waktu": 0,
+            "relay_menyala": False
+        }).eq("id", record_id).execute()
+        
+        # 2. Kirim pesan notifikasi elegan ke Telegram
+        pesan = (
+            f"✨ *PENGERINGAN SELESAI* ✨\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Sepatu {jenis} telah kering sempurna.\n"
+            f"Mesin telah dimatikan secara otomatis.\n\n"
+            f"Terima kasih telah menggunakan Smart Shoe Dryer."
+        )
+        send_telegram_message(chat_id, pesan)
+        
+        return jsonify({"status": "success", "message": "Notifikasi terkirim"}), 200
+        
+    return jsonify({"status": "ignored", "message": "Tidak ada sesi aktif"}), 200
 
 # Untuk testing lokal
 if __name__ == '__main__':
