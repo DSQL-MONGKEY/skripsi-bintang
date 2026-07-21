@@ -420,6 +420,47 @@ def notify_done():
         
     return jsonify({"status": "ignored", "message": "Tidak ada sesi aktif"}), 200
 
+# ==========================================
+# ROUTE KHUSUS TRIGGER STATUS BERKALA (30 MENIT)
+# ==========================================
+@app.route('/api/notify_status', methods=['POST'])
+def notify_status():
+    if not supabase:
+        return jsonify({'error': 'Koneksi database terputus'}), 500
+
+    # Tarik data sesi yang sedang berjalan
+    response = supabase.table("sesi_pengeringan").select("*").eq("status", "aktif").execute()
+    
+    if len(response.data) > 0:
+        sesi = response.data[0]
+        chat_id = sesi["chat_id"]
+        
+        suhu = sesi.get("suhu_sekarang", "-")
+        kelembapan = sesi.get("kelembapan_sekarang", "-")
+        sisa = sesi.get("sisa_waktu", "-")
+        relay_nyala = sesi.get("relay_menyala")
+        jenis = sesi.get("jenis_sepatu", "-")
+        
+        # Penamaan status yang representatif
+        ikon_relay = "🔥 Memanaskan" if relay_nyala else "🌡️ Menstabilkan Suhu"
+        
+        # Tampilan UI Minimalis dan Elegan untuk notifikasi berkala
+        pesan = (
+            f"⏱️ *UPDATE BERKALA (30 MENIT)*\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"👟 Jenis : {jenis}\n"
+            f"🌡️ Suhu : {suhu} °C\n"
+            f"💧 Lembap : {kelembapan} %\n"
+            f"⏳ Sisa Waktu : {sisa} menit\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🔌 Kondisi : {ikon_relay}"
+        )
+        
+        send_telegram_message(chat_id, pesan)
+        return jsonify({"status": "success", "message": "Notifikasi berkala terkirim"}), 200
+        
+    return jsonify({"status": "ignored", "message": "Tidak ada sesi aktif"}), 200
+
 # Untuk testing lokal
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
